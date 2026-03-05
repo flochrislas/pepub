@@ -1,4 +1,4 @@
-import argparse, os, posixpath, re, sys, unicodedata, warnings, zipfile
+import argparse, io, os, posixpath, re, sys, unicodedata, warnings, zipfile
 from pathlib import Path
 import ebooklib, yaml
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
@@ -196,12 +196,16 @@ def _build_flat_toc(book):
     return entries
 
 
-def _extract_section_html(html_content, start_anchor_id, end_anchor_id=None):
+def _extract_section_html(html_content, start_anchor_id, end_anchor_id=None,
+                          start_title=None, end_title=None):
     """Extract a body section from start_anchor_id up to (but not including) end_anchor_id.
 
     Returns a BeautifulSoup <body> element containing only the extracted fragment.
-    If start_anchor_id is None the full body is returned. Falls back to the full body
-    when start_anchor_id is not found in the HTML.
+    If start_anchor_id is None the full body is returned.
+
+    When an anchor ID is not found in the HTML, falls back to locating the boundary
+    by matching start_title / end_title against block-level element text content.
+    Falls back to the full body only when both anchor and title lookups fail.
     """
     soup = BeautifulSoup(html_content, 'lxml')
     body = soup.find('body')
@@ -221,6 +225,23 @@ def _extract_section_html(html_content, start_anchor_id, end_anchor_id=None):
                 return s.rfind('<', 0, idx)
         return -1
 
+    def _norm(s):
+        s = re.sub(r'<[^>]+>', '', s)
+        s = s.replace('\u00a0', ' ')
+        s = re.sub(r'&[a-z]+;|&#\d+;', ' ', s)
+        s = unicodedata.normalize('NFC', s)
+        return re.sub(r'\s+', ' ', s).strip().lower()
+
+    def _find_title_pos(s, title):
+        """Return the position of a block element whose plain text matches title."""
+        title_norm = _norm(title)
+        if not title_norm:
+            return -1
+        for m in re.finditer(r'<(p|h[1-6])\b[^>]*>(.*?)</\1>', s, re.DOTALL | re.IGNORECASE):
+            if _norm(m.group(2)) == title_norm:
+                return m.start()
+        return -1
+
     body_open_end = html_str.index('>') + 1
     body_close = html_str.rfind('</body>')
     if body_close < 0:
@@ -228,6 +249,8 @@ def _extract_section_html(html_content, start_anchor_id, end_anchor_id=None):
 
     if start_anchor_id:
         start = _find_tag_start(html_str, start_anchor_id)
+        if start < 0 and start_title:
+            start = _find_title_pos(html_str, start_title)
         if start < 0:
             start = body_open_end
     else:
@@ -235,6 +258,8 @@ def _extract_section_html(html_content, start_anchor_id, end_anchor_id=None):
 
     if end_anchor_id:
         end = _find_tag_start(html_str, end_anchor_id)
+        if end < 0 and end_title:
+            end = _find_title_pos(html_str, end_title)
         if end < 0 or end <= start:
             end = body_close
     else:
@@ -267,21 +292,33 @@ def build_css_heading_classes(book):
             css = item.get_content().decode('utf-8', errors='replace')
         except Exception:
             continue
-        for m in re.finditer(r'\.([\w-]+)\s*\{([^}]*)\}', css, re.DOTALL):
-            classname, props = m.group(1), m.group(2)
+        for m in re.finditer(r'([^{}]+)\{([^}]*)\}', css, re.DOTALL):
+            selector_raw, props = m.group(1).strip(), m.group(2)
+            # Only process simple single-class selectors (.classname or
+            # tag.classname). Skip compound/descendant selectors like
+            # "#id .classname" — those override styles in a specific context
+            # and should not be treated as global heading styles.
+            classnames_to_check = []
+            for sel in selector_raw.split(','):
+                sel = sel.strip()
+                cls_m = re.match(r'^[\w]*\.([\w-]+)$', sel)
+                if cls_m:
+                    classnames_to_check.append(cls_m.group(1))
+            if not classnames_to_check:
+                continue
 
             # Large font-size (keyword or em/pt value)
             fs = re.search(r'font-size\s*:\s*([^;]+)', props)
             if fs:
                 v = fs.group(1).strip().lower()
                 if v in ('large', 'x-large', 'xx-large', 'larger'):
-                    heading_classes.add(classname)
+                    heading_classes.update(classnames_to_check)
                     continue
                 fm = re.match(r'([\d.]+)(em|rem|pt|px)', v)
                 if fm:
                     n, u = float(fm.group(1)), fm.group(2)
                     if (u in ('em', 'rem') and n > 1.1) or (u == 'pt' and n > 13) or (u == 'px' and n > 17):
-                        heading_classes.add(classname)
+                        heading_classes.update(classnames_to_check)
                         continue
 
             # Centered block with no text-indent and a significant top margin
@@ -298,7 +335,7 @@ def build_css_heading_classes(book):
                     if parts:
                         top_val = parts[0]
                 if top_val and _css_length_is_large(top_val):
-                    heading_classes.add(classname)
+                    heading_classes.update(classnames_to_check)
 
     return heading_classes
 
@@ -702,7 +739,7 @@ def convert_epub(epub_path, overwrite=False):
 
     if output_dir.exists() and not overwrite:
         print(f'  Skipping (already converted): {output_dir.name}')
-        return
+        return 'skipped'
 
     output_dir.mkdir(exist_ok=True)
 
@@ -723,13 +760,15 @@ def convert_epub(epub_path, overwrite=False):
         toc_sections = []
         for i, (title, file_href, anchor_id) in enumerate(flat_toc):
             next_anchor = None
+            next_title = None
             for j in range(i + 1, len(flat_toc)):
                 if flat_toc[j][1] == file_href:
                     next_anchor = flat_toc[j][2]
+                    next_title = flat_toc[j][0]
                     break
                 else:
                     break
-            toc_sections.append((title, file_href, anchor_id, next_anchor))
+            toc_sections.append((title, file_href, anchor_id, next_anchor, next_title))
 
         item_cache = {}
 
@@ -748,7 +787,7 @@ def convert_epub(epub_path, overwrite=False):
         total = len(toc_sections)
         index = 1
 
-        for toc_title, file_href, anchor_id, next_anchor in toc_sections:
+        for toc_title, file_href, anchor_id, next_anchor, next_title in toc_sections:
             try:
                 item = _get_item(file_href)
                 if item is None:
@@ -757,7 +796,8 @@ def convert_epub(epub_path, overwrite=False):
                 if hasattr(item, 'properties') and 'nav' in (item.properties or []):
                     continue
 
-                body = _extract_section_html(item.get_content(), anchor_id, next_anchor)
+                body = _extract_section_html(item.get_content(), anchor_id, next_anchor,
+                                             start_title=toc_title, end_title=next_title)
                 if body is None or (not body.get_text(strip=True) and not body.find('img')):
                     continue
 
@@ -797,7 +837,57 @@ def convert_epub(epub_path, overwrite=False):
     print(f'Done. Output: {output_dir}')
 
 
+def _print_batch_report(results):
+    """Print a summary table after batch conversion.
+
+    results: list of (epub_name, status, warning_lines, error_msg)
+      status: 'ok' | 'skipped' | 'error'
+    """
+    use_color = sys.stdout.isatty()
+    RED    = '\033[31m' if use_color else ''
+    YELLOW = '\033[33m' if use_color else ''
+    GREEN  = '\033[32m' if use_color else ''
+    BOLD   = '\033[1m'  if use_color else ''
+    RESET  = '\033[0m'  if use_color else ''
+
+    n_total   = len(results)
+    n_ok      = sum(1 for _, s, w, _ in results if s == 'ok' and not w)
+    n_warned  = sum(1 for _, s, w, _ in results if s == 'ok' and w)
+    n_skipped = sum(1 for _, s, _, _ in results if s == 'skipped')
+    n_errors  = sum(1 for _, s, _, _ in results if s == 'error')
+
+    bar = '-' * 42
+    print(f'\n{BOLD}{bar}{RESET}')
+    print(f'{BOLD} Batch report — {n_total} file{"s" if n_total != 1 else ""}{RESET}')
+    print(f'{BOLD}{bar}{RESET}')
+    print(f' {GREEN}✓{RESET}  {n_ok + n_warned:<4} converted')
+    if n_warned:
+        print(f' {YELLOW}⚠{RESET}  {n_warned:<4} of those had warnings')
+    print(f'    {n_skipped:<4} skipped (already converted)')
+    if n_errors:
+        print(f' {RED}✗{RESET}  {n_errors:<4} errors')
+    print(f'{BOLD}{bar}{RESET}')
+
+    warned_results = [(n, w) for n, s, w, _ in results if s == 'ok' and w]
+    if warned_results:
+        print(f'\n{YELLOW}Warnings:{RESET}')
+        for name, warning_lines in warned_results:
+            print(f'  {name}  ({len(warning_lines)})')
+
+    error_results = [(n, e) for n, s, _, e in results if s == 'error']
+    if error_results:
+        print(f'\n{RED}Errors:{RESET}')
+        for name, error_msg in error_results:
+            print(f'  {RED}{name}{RESET} — {error_msg}')
+
+
 def main():
+    # Ensure stdout/stderr use UTF-8 on Windows consoles so accented titles
+    # and Unicode report symbols are not mangled.
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, 'reconfigure'):
+            _stream.reconfigure(encoding='utf-8')
+
     parser = argparse.ArgumentParser(
         description='Convert an EPUB (or a folder of EPUBs) to Obsidian-compatible markdown files.'
     )
@@ -826,12 +916,40 @@ def main():
             print(f'No EPUB files found in: {target}', file=sys.stderr)
             sys.exit(1)
         total = len(epubs)
+        results = []  # (name, status, warning_lines, error_msg)
+
+        class _Tee:
+            """Write to both the real stderr and a capture buffer."""
+            def __init__(self, real):
+                self.real = real
+                self.buf = io.StringIO()
+            def write(self, text):
+                self.real.write(text)
+                self.buf.write(text)
+            def flush(self):
+                self.real.flush()
+
         for i, epub_path in enumerate(epubs, 1):
-            print(f'[{i}/{total}] {epub_path.name}')
+            print(f'[{i}/{total}] {epub_path.name}', flush=True)
+            tee = _Tee(sys.stderr)
+            sys.stderr = tee
+            status = 'ok'
+            error_msg = ''
             try:
-                convert_epub(epub_path, overwrite=args.overwrite)
+                outcome = convert_epub(epub_path, overwrite=args.overwrite)
+                if outcome == 'skipped':
+                    status = 'skipped'
             except Exception as e:
-                print(f'  Error: {e}', file=sys.stderr)
+                status = 'error'
+                error_msg = str(e)
+                print(f'  Error: {e}', file=tee.real)
+            finally:
+                sys.stderr = tee.real
+            captured = tee.buf.getvalue()
+            warning_lines = [l for l in captured.splitlines() if l.startswith('Warning:')]
+            results.append((epub_path.name, status, warning_lines, error_msg))
+
+        _print_batch_report(results)
     else:
         print(f'Error: path not found: {target}', file=sys.stderr)
         sys.exit(1)
