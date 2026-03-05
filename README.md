@@ -1,17 +1,75 @@
 # pepub
 
-Convert EPUB files into markdown files.
+Convert EPUB books into Obsidian-compatible markdown files.
 
-I use this to transform a bunch of eBooks in EPUB format into markdown files to use in my Obsidian vault.
+Each book is extracted into a dedicated folder containing one markdown file per chapter (or TOC section), a table-of-contents index file with YAML frontmatter, and an `assets/` subfolder for images.
 
-It is coded in Python, leveraging the power of Pandoc.
+```
+My Book/
+├── 00 - My Book.md          ← index with YAML frontmatter + [[wiki-links]]
+├── 01 - Introduction.md
+├── 02 - Chapter One.md
+├── ...
+└── assets/
+    └── cover.jpg
+```
 
-Both command line and GUI are available.
+The index file includes editable metadata fields ready for use in Obsidian:
 
-Can work with single files, or by entire folder. There is an option to overwrite existing or not.
+```yaml
+---
+title: My Book
+author: Author Name
+publisher: Publisher
+year: 2021
+read: false
+rating: null
+tags:
+  - book
+---
+```
 
-Requires the following packages:
-`pip install customtkinter ebooklib beautifulsoup4 lxml pyyaml pypandoc`
+## Requirements
 
-Requires Pandoc.
-On Windows : `winget install --id JohnMacFarlane.Pandoc`, or download from pandoc.org
+**Pandoc** must be installed and available in `PATH`:
+
+```bash
+# Windows
+winget install --id JohnMacFarlane.Pandoc
+
+# macOS
+brew install pandoc
+```
+
+Or download from [pandoc.org](https://pandoc.org/installing.html).
+
+**Python packages:**
+
+```bash
+pip install ebooklib beautifulsoup4 lxml pyyaml pypandoc customtkinter
+```
+
+## Usage
+
+### Command line
+
+```bash
+# Single file
+python pepub.py path/to/book.epub
+
+# Entire folder
+python pepub.py path/to/folder/
+
+# Re-convert books that were already converted
+python pepub.py path/to/book.epub --overwrite
+```
+
+Output is written to a folder named after the book title, in the same directory as the source EPUB.
+
+### GUI
+
+```bash
+pythonw pepub-gui.pyw
+```
+
+Or double-click `pepub-gui.bat` on Windows. The GUI lets you pick a file or folder, toggle the overwrite option, and view conversion progress in a log window.
