@@ -362,6 +362,49 @@ _PROMOTE_INLINE = frozenset({
 })
 
 
+_BOLD_TAGS = frozenset(['b', 'strong'])
+_BOLD_CLASSES = frozenset(['bold', 'gras'])
+
+
+def _is_bold_heading(el):
+    """Return True if el looks like an unlabelled bold heading.
+
+    Criteria (all must hold):
+    - Short text (≤ 80 chars) with at least 2 non-separator characters.
+    - Does not read like a sentence (no ". " mid-text, does not end with '.').
+    - Every non-whitespace text node is inside a <b>, <strong>, or
+      <span class="bold|gras"> ancestor — i.e. the whole content is bold.
+
+    This catches Calibre-generated EPUBs where sub-headings are encoded as
+    plain <p> elements with bold spans rather than proper <h> tags or
+    named heading CSS classes.
+    """
+    from bs4 import NavigableString
+    text = el.get_text(strip=True)
+    if not text or len(text) > 80:
+        return False
+    if len(re.sub(r'[\s*·•\-–—_=~]+', '', text)) < 2:
+        return False  # separator line, not a heading
+    if re.search(r'\.\s', text) or text.endswith('.'):
+        return False  # reads like a sentence
+    for node in el.descendants:
+        if not isinstance(node, NavigableString) or not str(node).strip():
+            continue
+        parent = node.parent
+        in_bold = False
+        while parent and parent is not el:
+            if parent.name in _BOLD_TAGS:
+                in_bold = True
+                break
+            if parent.name == 'span' and _BOLD_CLASSES.intersection(parent.get('class', [])):
+                in_bold = True
+                break
+            parent = parent.parent
+        if not in_bold:
+            return False
+    return True
+
+
 def promote_title_elements(soup, css_heading_classes=None, seen_title=False):
     """Convert non-heading elements with title-like CSS classes to <h> tags.
 
@@ -369,6 +412,7 @@ def promote_title_elements(soup, css_heading_classes=None, seen_title=False):
     1. _TITLE_CLASS_RE matches  → first seen: h1, rest: h2
     2. _INTERTITLE_CLASS_RE     → h{niv+1} (default h2)
     3. css_heading_classes      → always h2 (section headings in generic EPUBs)
+    4. _is_bold_heading         → always h2 (Calibre-style bold-only headings)
 
     Pass seen_title=True when the chapter heading has already been established
     (e.g. the original h1 was a bare number and was removed) so that interior
@@ -384,8 +428,6 @@ def promote_title_elements(soup, css_heading_classes=None, seen_title=False):
         if el.name in _PROMOTE_INLINE:
             continue  # never promote inline elements (catches drop-caps etc.)
         cls_list = el.get('class', [])
-        if not cls_list:
-            continue
         cls = ' '.join(cls_list)
 
         is_main_title = bool(_TITLE_CLASS_RE.search(cls))
@@ -403,7 +445,7 @@ def promote_title_elements(soup, css_heading_classes=None, seen_title=False):
             m = re.search(r'niv(\d+)', cls, re.IGNORECASE)
             level = min(int(m.group(1)) + 1, 4) if m else 2
             el.name = f'h{level}'
-        elif is_css_heading:
+        elif is_css_heading or _is_bold_heading(el):
             # Skip separator elements (e.g. a centered paragraph containing only '*' or '***')
             text = el.get_text(strip=True)
             if text and len(re.sub(r'[\s*·•\-–—_=~]+', '', text)) >= 2:
