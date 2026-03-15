@@ -11,8 +11,9 @@ try:
 
     # Allow importing pepub.py from the same directory as this script
     sys.path.insert(0, str(Path(__file__).parent))
-    from pepub import convert_epub
+    from pepub import convert_epub, _print_batch_report
     import pypandoc
+    import io
 
 except Exception as _import_error:
     _root = tkinter.Tk()
@@ -158,12 +159,39 @@ class App(ctk.CTk):
                     print(f'No EPUB files found in: {target}')
                 else:
                     total = len(epubs)
+                    results = []
+
+                    class _Tee:
+                        def __init__(self, real):
+                            self.real = real
+                            self.buf = io.StringIO()
+                        def write(self, text):
+                            self.real.write(text)
+                            self.buf.write(text)
+                        def flush(self):
+                            self.real.flush()
+
                     for i, epub_path in enumerate(epubs, 1):
-                        print(f'[{i}/{total}] {epub_path.name}')
+                        print(f'[{i}/{total}] {epub_path.name}', flush=True)
+                        tee = _Tee(sys.stderr)
+                        sys.stderr = tee
+                        status = 'ok'
+                        error_msg = ''
                         try:
-                            convert_epub(epub_path, overwrite=overwrite)
+                            outcome = convert_epub(epub_path, overwrite=overwrite)
+                            if outcome == 'skipped':
+                                status = 'skipped'
                         except Exception as e:
-                            print(f'  Error: {e}')
+                            status = 'error'
+                            error_msg = str(e)
+                            print(f'  Error: {e}', file=tee.real)
+                        finally:
+                            sys.stderr = tee.real
+                        captured = tee.buf.getvalue()
+                        warning_lines = [l for l in captured.splitlines() if l.startswith('Warning:')]
+                        results.append((epub_path.name, status, warning_lines, error_msg))
+
+                    _print_batch_report(results)
             else:
                 print(f'Path not found: {path}')
         except Exception as e:
