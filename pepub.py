@@ -279,11 +279,19 @@ def _css_length_is_large(val):
     return False
 
 
+
+# Class names that are always body text, never headings — regardless of font-size.
+# Matches MsoNormal, MsoNormal1, MsoNormal3, MsoFootnoteText, MsoBodyText, etc.
+_BODY_CLASS_BLOCKLIST_RE = re.compile(
+    r'^(mso(?:normal|body|footnote|plain)|normal|bodytext|para)\d*$', re.IGNORECASE
+)
+
+
 def build_css_heading_classes(book):
     """Parse EPUB CSS and return class names that look like block headings.
 
     Heuristics (block-level signals only, to avoid catching inline drop-caps):
-    - font-size: large / x-large / > 1.1em / > 13pt
+    - font-size: large / x-large / > 1.3em / > 15pt (without text-indent)
     - text-align: center  AND  text-indent: 0  AND  top-margin >= 1.5em
     """
     heading_classes = set()
@@ -303,13 +311,21 @@ def build_css_heading_classes(book):
                 sel = sel.strip()
                 cls_m = re.match(r'^[\w]*\.([\w-]+)$', sel)
                 if cls_m:
-                    classnames_to_check.append(cls_m.group(1))
+                    cls_name = cls_m.group(1)
+                    if not _BODY_CLASS_BLOCKLIST_RE.match(cls_name):
+                        classnames_to_check.append(cls_name)
             if not classnames_to_check:
                 continue
 
             # Large font-size (keyword or em/pt value)
+            # Skip classes with a non-zero text-indent — those are body paragraph
+            # styles (e.g. MsoNormal from Word/Calibre), not headings.
+            indent_m = re.search(r'text-indent\s*:\s*([^;]+)', props)
+            has_para_indent = bool(
+                indent_m and not re.match(r'\s*0[a-z]*\s*$', indent_m.group(1).strip())
+            )
             fs = re.search(r'font-size\s*:\s*([^;]+)', props)
-            if fs:
+            if fs and not has_para_indent:
                 v = fs.group(1).strip().lower()
                 if v in ('large', 'x-large', 'xx-large', 'larger'):
                     heading_classes.update(classnames_to_check)
@@ -317,7 +333,7 @@ def build_css_heading_classes(book):
                 fm = re.match(r'([\d.]+)(em|rem|pt|px)', v)
                 if fm:
                     n, u = float(fm.group(1)), fm.group(2)
-                    if (u in ('em', 'rem') and n > 1.1) or (u == 'pt' and n > 13) or (u == 'px' and n > 17):
+                    if (u in ('em', 'rem') and n > 1.3) or (u == 'pt' and n > 15) or (u == 'px' and n > 20):
                         heading_classes.update(classnames_to_check)
                         continue
 
