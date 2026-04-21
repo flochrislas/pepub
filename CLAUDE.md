@@ -7,19 +7,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **CLI — single EPUB:**
 ```bash
 python pepub.py path/to/book.epub
-python pepub.py path/to/book.epub --overwrite   # re-convert even if output folder exists
+python pepub.py path/to/book.epub --overwrite                # re-convert even if output folder exists
+python pepub.py path/to/book.epub -d path/to/vault           # write into a specific folder
 ```
 
 **CLI — batch (folder of EPUBs):**
 ```bash
 python pepub.py path/to/folder/
+python pepub.py path/to/folder/ --output-dir path/to/vault
 ```
+
+`-d / --output-dir` is optional. When unset, each book's folder is written next to its source `.epub`. When set, the directory is created if missing and every book is written under it.
 
 **GUI:**
 ```bash
 pythonw pepub-gui.pyw    # Windows, no console window
 # or double-click pepub-gui.bat
 ```
+
+A sibling PDF converter (`pepdf.py`, `pepdf-gui.pyw`) lives in the same repo and follows the same CLI/GUI conventions. Changes to CLI flags, GUI layout, or output folder naming should generally be mirrored between the two.
 
 ## External Requirement
 
@@ -37,8 +43,11 @@ pythonw pepub-gui.pyw    # Windows, no console window
 
 The project is two files:
 
-- **`pepub.py`** — all conversion logic; no side-effects on import, safe to `import convert_epub` from elsewhere
-- **`pepub-gui.pyw`** — `customtkinter` wrapper; imports and calls `convert_epub()` in a background thread, redirecting stdout/stderr into a queue that feeds the log textbox
+- **`pepub.py`** — all conversion logic; no side-effects on import, safe to `import convert_epub` from elsewhere. `convert_epub(epub_path, overwrite=False, output_base_dir=None)` is the single entry point.
+- **`pepub-gui.pyw`** — `customtkinter` wrapper; imports and calls `convert_epub()` in a background thread, redirecting stdout/stderr into a queue that feeds a textbox. That textbox is a **single shared area** that cycles through three states:
+  - **idle** (no input path) — welcome / how-to-use text
+  - **preview** (input path set) — list of EPUBs that will actually be converted, filtered against existing subdirectories of the output folder (or each EPUB's parent folder when output is empty) and against the Overwrite checkbox. Uses `pepub.sanitize_filename(stem)` for the match so it stays consistent with `convert_epub`'s folder-naming rule.
+  - **log** (conversion running) — live stdout/stderr from the worker thread; a `_converting` flag suppresses preview refreshes so path edits mid-run don't wipe the log. A `StreamToQueue.isatty()` returning `False` is required so `_print_batch_report` can emit a plain-text summary after folder runs without crashing on ANSI color probing.
 
 ### Conversion pipeline (`convert_epub`)
 
@@ -66,6 +75,7 @@ The project is two files:
 
 ### Key design decisions
 
+- **Output folder name comes from the EPUB filename stem**, not from the book's `<dc:title>` metadata. `convert_epub` computes `output_dir = base_dir / sanitize_filename(path.stem)`. This lets the user rename an `.epub` before conversion to control the output folder name, and makes the "already converted" skip check (`output_dir.exists() and not overwrite`) pivot on the filename too. The YAML `title` in `00 - …md` still uses the book metadata — bad/missing metadata leaks there, not into the folder or skip logic.
 - `_read_epub_tolerant` monkey-patches `zipfile.ZipFile.read` to return empty bytes for manifest items missing from the ZIP archive (a common EPUB defect), restoring the original method in a `finally` block
 - In TOC-driven mode, `_extract_section_html` uses raw string search (not a second parse) to find anchor positions, then wraps the slice in `<body>…</body>` for a second parse — faster than re-parsing the full document per section
 - `index` (chapter counter) increments only for sections/chapters that produce non-empty output; `total` is the number of TOC entries (or candidate spine items) to fix zero-padding width
