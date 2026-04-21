@@ -1,5 +1,6 @@
 import argparse, io, os, posixpath, re, sys, unicodedata, warnings, zipfile
 from pathlib import Path
+from urllib.parse import unquote
 import ebooklib, yaml
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from ebooklib import epub
@@ -178,16 +179,16 @@ def _build_flat_toc(book):
         for item in items:
             if isinstance(item, epub.Link):
                 href_parts = item.href.split('#', 1)
-                file_href = href_parts[0]
-                anchor = href_parts[1] if len(href_parts) > 1 else None
+                file_href = unquote(href_parts[0])
+                anchor = unquote(href_parts[1]) if len(href_parts) > 1 else None
                 if item.title and file_href:
                     entries.append((item.title, file_href, anchor))
             elif isinstance(item, tuple) and len(item) == 2:
                 section, children = item
                 if hasattr(section, 'href') and section.href:
                     href_parts = section.href.split('#', 1)
-                    file_href = href_parts[0]
-                    anchor = href_parts[1] if len(href_parts) > 1 else None
+                    file_href = unquote(href_parts[0])
+                    anchor = unquote(href_parts[1]) if len(href_parts) > 1 else None
                     if hasattr(section, 'title') and section.title:
                         entries.append((section.title, file_href, anchor))
                 _walk(children)
