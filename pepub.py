@@ -780,7 +780,7 @@ def _read_epub_tolerant(path):
         zipfile.ZipFile.read = original_read
 
 
-def convert_epub(epub_path, overwrite=False):
+def convert_epub(epub_path, overwrite=False, output_base_dir=None):
     path = Path(epub_path)
     if not path.exists():
         print(f'Error: file not found: {epub_path}', file=sys.stderr)
@@ -792,14 +792,19 @@ def convert_epub(epub_path, overwrite=False):
     book = _read_epub_tolerant(path)
     metadata = extract_metadata(book)
 
-    safe_title = sanitize_filename(metadata['title'])
-    output_dir = path.parent / safe_title
+    # The output folder is named after the EPUB filename (without extension),
+    # so the user can rename the .epub before conversion to control the output
+    # folder name — and rerunning will skip already-converted books that share
+    # that name.
+    folder_name = sanitize_filename(path.stem)
+    base_dir = Path(output_base_dir) if output_base_dir else path.parent
+    output_dir = base_dir / folder_name
 
     if output_dir.exists() and not overwrite:
         print(f'  Skipping (already converted): {output_dir.name}')
         return 'skipped'
 
-    output_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     assets_dir = output_dir / 'assets'
     image_map = extract_images(book, assets_dir)
@@ -952,7 +957,18 @@ def main():
     parser.add_argument('path', help='Path to an EPUB file or a folder containing EPUB files')
     parser.add_argument('-o', '--overwrite', action='store_true',
                         help='Overwrite already-converted books (default: skip them)')
+    parser.add_argument('-d', '--output-dir',
+                        help='Directory where converted books are written '
+                             '(default: same folder as each EPUB)')
     args = parser.parse_args()
+
+    output_base_dir = None
+    if args.output_dir:
+        output_base_dir = Path(args.output_dir)
+        if output_base_dir.exists() and not output_base_dir.is_dir():
+            print(f'Error: output path is not a directory: {output_base_dir}', file=sys.stderr)
+            sys.exit(1)
+        output_base_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         pypandoc.get_pandoc_version()
@@ -967,7 +983,7 @@ def main():
     target = Path(args.path)
 
     if target.is_file():
-        convert_epub(target, overwrite=args.overwrite)
+        convert_epub(target, overwrite=args.overwrite, output_base_dir=output_base_dir)
     elif target.is_dir():
         epubs = sorted(target.glob('*.epub'))
         if not epubs:
@@ -994,7 +1010,8 @@ def main():
             status = 'ok'
             error_msg = ''
             try:
-                outcome = convert_epub(epub_path, overwrite=args.overwrite)
+                outcome = convert_epub(epub_path, overwrite=args.overwrite,
+                                       output_base_dir=output_base_dir)
                 if outcome == 'skipped':
                     status = 'skipped'
             except Exception as e:
